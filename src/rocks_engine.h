@@ -38,6 +38,7 @@
 #include <boost/optional.hpp>
 
 #include <rocksdb/cache.h>
+#include <rocksdb/db.h>
 #include <rocksdb/rate_limiter.h>
 #include <rocksdb/status.h>
 #include <rocksdb/statistics.h>
@@ -65,6 +66,7 @@ namespace rocksdb {
 }
 
 namespace mongo {
+    const std::string kOplogColumnFamilyName("oplog");
 
     struct CollectionOptions;
     class RocksIndexBase;
@@ -165,9 +167,11 @@ namespace mongo {
         std::string _getIdentPrefix(StringData ident);
 
         rocksdb::Options _options() const;
+        void _getColumnFamilies(std::vector<std::string> &column_family_names, std::vector<rocksdb::ColumnFamilyDescriptor> &column_families);
 
         std::string _path;
         std::unique_ptr<rocksdb::DB> _db;
+        std::unique_ptr<std::map<std::string, rocksdb::ColumnFamilyHandle*>> _cf_map;
         std::shared_ptr<rocksdb::Cache> _block_cache;
         int _maxWriteMBPerSec;
         std::shared_ptr<rocksdb::RateLimiter> _rateLimiter;

@@ -281,12 +281,14 @@ namespace mongo {
 
     RocksRecordStore::RocksRecordStore(StringData ns, StringData id, rocksdb::DB* db,
                                        RocksCounterManager* counterManager,
+                                       std::map<std::string, rocksdb::ColumnFamilyHandle*>* cf_map,
                                        RocksDurabilityManager* durabilityManager,
                                        std::string prefix, bool isCapped, int64_t cappedMaxSize,
                                        int64_t cappedMaxDocs, CappedCallback* cappedCallback)
         : RecordStore(ns),
           _db(db),
           _counterManager(counterManager),
+          _cf_map(cf_map),
           _prefix(std::move(prefix)),
           _isCapped(isCapped),
           _cappedMaxSize(cappedMaxSize),
@@ -374,7 +376,7 @@ namespace mongo {
     }
 
     RecordData RocksRecordStore::dataFor(OperationContext* txn, const RecordId& loc) const {
-        RecordData rd = _getDataFor(_db, _prefix, txn, loc);
+        RecordData rd = _getDataFor(_db, _prefix, _isOplog, _cf_map, txn, loc);
         massert(28605, "Didn't find RecordId in RocksRecordStore", (rd.data() != nullptr));
         return rd;
     }
@@ -575,9 +577,10 @@ namespace mongo {
                     }
                 }
 
-                ru->writeBatch()->Delete(key);
-                if (_isOplog) {
+                if (_isOplog) { // No need to actually delete key if oplog. FIFO compaction will collect it instead.
                     _oplogKeyTracker->deleteKey(ru, newestOld);
+                } else {
+                    ru->writeBatch()->Delete(key);
                 }
 
                 iter->Next();
@@ -672,11 +675,13 @@ namespace mongo {
             loc = _nextId();
         }
 
-        // No need to register the write here, since we just allocated a new RecordId so no other
-        // transaction can access this key before we commit
-        ru->writeBatch()->Put(_makePrefixedKey(_prefix, loc), rocksdb::Slice(data, len));
         if (_isOplog) {
+            ru->writeBatch()->Put(_cf_map->find("oplog")->second, _makePrefixedKey(_prefix, loc), rocksdb::Slice(data, len));
             _oplogKeyTracker->insertKey(ru, loc, len);
+        } else {
+            // No need to register the write here, since we just allocated a new RecordId so no other
+            // transaction can access this key before we commit
+            ru->writeBatch()->Put(_makePrefixedKey(_prefix, loc), rocksdb::Slice(data, len));
         }
 
         _changeNumRecords( txn, 1 );
@@ -717,9 +722,11 @@ namespace mongo {
 
         int old_length = old_value.size();
 
-        ru->writeBatch()->Put(key, rocksdb::Slice(data, len));
         if (_isOplog) {
+            ru->writeBatch()->Put(_cf_map->find("oplog")->second, key, rocksdb::Slice(data, len));
             _oplogKeyTracker->insertKey(ru, loc, len);
+        } else {
+            ru->writeBatch()->Put(key, rocksdb::Slice(data, len));
         }
 
         _increaseDataSize(txn, len - old_length);
@@ -755,7 +762,9 @@ namespace mongo {
             ru->setOplogReadTill(_cappedVisibilityManager->oplogStartHack());
         }
 
-        return stdx::make_unique<Cursor>(txn, _db, _prefix, _cappedVisibilityManager, forward,
+        return stdx::make_unique<Cursor>(txn, _db,
+                                         _isOplog ? _cf_map->find("oplog")->second : _db->DefaultColumnFamily(),
+                                         _prefix, _cappedVisibilityManager, forward,
                                          _isCapped);
     }
 
@@ -986,19 +995,25 @@ namespace mongo {
 
     bool RocksRecordStore::findRecord( OperationContext* txn,
                                        const RecordId& loc, RecordData* out ) const {
-        RecordData rd = _getDataFor(_db, _prefix, txn, loc);
+        RecordData rd = _getDataFor(_db, _prefix, _isOplog, _cf_map, txn, loc);
         if ( rd.data() == NULL )
             return false;
         *out = rd;
         return true;
     }
 
-    RecordData RocksRecordStore::_getDataFor(rocksdb::DB* db, const std::string& prefix,
+    RecordData RocksRecordStore::_getDataFor(rocksdb::DB* db, const std::string& prefix, bool isOplog,
+                                             std::map<std::string, rocksdb::ColumnFamilyHandle*>* cf_map,
                                              OperationContext* txn, const RecordId& loc) {
         RocksRecoveryUnit* ru = RocksRecoveryUnit::getRocksRecoveryUnit(txn);
 
         std::string valueStorage;
-        auto status = ru->Get(_makePrefixedKey(prefix, loc), &valueStorage);
+        rocksdb::Status status;
+        if (isOplog) {
+            status = ru->Get(cf_map->find("oplog")->second, _makePrefixedKey(prefix, loc), &valueStorage);
+        } else {
+            status = ru->Get(_makePrefixedKey(prefix, loc), &valueStorage);
+        }
         if (status.IsNotFound()) {
             return RecordData(nullptr, 0);
         }
@@ -1024,12 +1039,14 @@ namespace mongo {
     RocksRecordStore::Cursor::Cursor(
             OperationContext* txn,
             rocksdb::DB* db,
+            rocksdb::ColumnFamilyHandle* cf,
             std::string prefix,
             std::shared_ptr<CappedVisibilityManager> cappedVisibilityManager,
             bool forward,
             bool isCapped)
         : _txn(txn),
           _db(db),
+          _cf(cf),
           _prefix(std::move(prefix)),
           _cappedVisibilityManager(cappedVisibilityManager),
           _forward(forward),
@@ -1080,7 +1097,7 @@ namespace mongo {
             return _iterator.get();
         }
         _iterator.reset(RocksRecoveryUnit::getRocksRecoveryUnit(_txn)
-                ->NewIterator(_prefix, /* isOplog */ !_readUntilForOplog.isNull()));
+                ->NewIterator(_prefix, _cf, /* isOplog */ !_readUntilForOplog.isNull()));
         if (!_needFirstSeek) {
             positionIterator();
         }
@@ -1145,7 +1162,7 @@ namespace mongo {
     bool RocksRecordStore::Cursor::restore() {
         auto ru = RocksRecoveryUnit::getRocksRecoveryUnit(_txn);
         if (!_iterator.get() || _currentSequenceNumber != ru->snapshot()->GetSequenceNumber()) {
-            _iterator.reset(ru->NewIterator(_prefix, /* isOplog */ !_readUntilForOplog.isNull()));
+            _iterator.reset(ru->NewIterator(_prefix, _cf, /* isOplog */ !_readUntilForOplog.isNull()));
             _currentSequenceNumber = ru->snapshot()->GetSequenceNumber();
         }
 

@@ -389,7 +389,7 @@ namespace mongo {
         return _snapshot;
     }
 
-    rocksdb::Status RocksRecoveryUnit::Get(const rocksdb::Slice& key, std::string* value) {
+    rocksdb::Status RocksRecoveryUnit::Get(ColumnFamilyHandle* cf, const rocksdb::Slice& key, std::string* value) {
         if (_writeBatch.GetWriteBatch()->Count() > 0) {
             std::unique_ptr<rocksdb::WBWIIterator> wb_iterator(_writeBatch.NewIterator());
             wb_iterator->Seek(key);
@@ -404,19 +404,27 @@ namespace mongo {
         }
         rocksdb::ReadOptions options;
         options.snapshot = snapshot();
-        return _db->Get(options, key, value);
+        return _db->Get(options, cf, key, value);
     }
 
-    RocksIterator* RocksRecoveryUnit::NewIterator(std::string prefix, bool isOplog) {
+    rocksdb::Status RocksRecoveryUnit::Get(const rocksdb::Slice& key, std::string* value) {
+        return Get(_db->DefaultColumnFamily(), key, value);
+    }
+
+    RocksIterator* RocksRecoveryUnit::NewIterator(std::string prefix, ColumnFamilyHandle* cf, bool isOplog) {
         std::unique_ptr<rocksdb::Slice> upperBound(new rocksdb::Slice());
         rocksdb::ReadOptions options;
         options.iterate_upper_bound = upperBound.get();
         options.snapshot = snapshot();
-        auto iterator = _writeBatch.NewIteratorWithBase(_db->NewIterator(options));
+        auto iterator = _writeBatch.NewIteratorWithBase(_db->NewIterator(options, cf));
         auto prefixIterator = new PrefixStrippingIterator(std::move(prefix), iterator,
                                                           isOplog ? nullptr : _compactionScheduler,
                                                           std::move(upperBound));
         return prefixIterator;
+    }
+
+    RocksIterator* RocksRecoveryUnit::NewIterator(std::string prefix, bool isOplog) {
+        return NewIterator(prefix, _db->DefaultColumnFamily(), isOplog);
     }
 
     RocksIterator* RocksRecoveryUnit::NewIteratorNoSnapshot(rocksdb::DB* db, std::string prefix) {

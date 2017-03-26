@@ -106,6 +106,7 @@ namespace mongo {
     public:
         RocksRecordStore(StringData ns, StringData id, rocksdb::DB* db,
                          RocksCounterManager* counterManager,
+                         std::map<std::string, rocksdb::ColumnFamilyHandle*>* cf_map,
                          RocksDurabilityManager* durabilityManager, std::string prefix,
                          bool isCapped = false, int64_t cappedMaxSize = -1,
                          int64_t cappedMaxDocs = -1, CappedCallback* cappedDeleteCallback = NULL);
@@ -217,7 +218,8 @@ namespace mongo {
         // shared_ptrs
         class Cursor : public SeekableRecordCursor {
         public:
-            Cursor(OperationContext* txn, rocksdb::DB* db, std::string prefix,
+            Cursor(OperationContext* txn, rocksdb::DB* db,
+                   rocksdb::ColumnFamilyHandle* cf, std::string prefix,
                    std::shared_ptr<CappedVisibilityManager> cappedVisibilityManager,
                    bool forward, bool _isCapped);
 
@@ -239,6 +241,7 @@ namespace mongo {
 
             OperationContext* _txn;
             rocksdb::DB* _db; // not owned
+            rocksdb::ColumnFamilyHandle* _cf; // not owned
             std::string _prefix;
             std::shared_ptr<CappedVisibilityManager> _cappedVisibilityManager;
             bool _forward;
@@ -257,7 +260,8 @@ namespace mongo {
 
         static RecordId _makeRecordId( const rocksdb::Slice& slice );
 
-        static RecordData _getDataFor(rocksdb::DB* db, const std::string& prefix,
+        static RecordData _getDataFor(rocksdb::DB* db, const std::string& prefix, bool isOplog,
+                                      std::map<std::string, rocksdb::ColumnFamilyHandle*>* cf_map,
                                       OperationContext* txn, const RecordId& loc);
 
         RecordId _nextId();
@@ -272,6 +276,7 @@ namespace mongo {
 
         rocksdb::DB* _db;                      // not owned
         RocksCounterManager* _counterManager;  // not owned
+        std::map<std::string, rocksdb::ColumnFamilyHandle*>* _cf_map; // not owned
         std::string _prefix;
 
         const bool _isCapped;

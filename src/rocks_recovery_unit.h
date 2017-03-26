@@ -38,6 +38,7 @@
 #include <boost/scoped_ptr.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include <rocksdb/db.h>
 #include <rocksdb/slice.h>
 #include <rocksdb/write_batch.h>
 #include <rocksdb/utilities/write_batch_with_index.h>
@@ -125,7 +126,11 @@ namespace mongo {
 
         RocksTransaction* transaction() { return &_transaction; }
 
+        rocksdb::Status Get(ColumnFamilyHandle* cf, const rocksdb::Slice& key, std::string* value);
+
         rocksdb::Status Get(const rocksdb::Slice& key, std::string* value);
+
+        RocksIterator* NewIterator(std::string prefix, ColumnFamilyHandle* cf, bool isOplog);
 
         RocksIterator* NewIterator(std::string prefix, bool isOplog = false);
 

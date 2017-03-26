@@ -272,11 +272,42 @@ namespace mongo {
             _statistics = rocksdb::CreateDBStatistics();
         }
 
+        rocksdb::Status s;
+
+        // we may have more than 1 cf, since oplog resides in different cf.
+        std::vector<std::string> column_family_names;
+        std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
+        std::vector<rocksdb::ColumnFamilyHandle*> handles;
+
+        _getColumnFamilies(column_family_names, column_families);
+        if (std::find(column_family_names.begin(), column_family_names.end(), kOplogColumnFamilyName) == column_family_names.end()) { // Oplog column family doesn't exist. Create it.
+            rocksdb::DB* db;
+            s = rocksdb::DB::Open(_options(), path, column_families, &handles, &db);
+            invariantRocksOK(s);
+
+            rocksdb::ColumnFamilyHandle *cf;
+            s = db->CreateColumnFamily(rocksdb::ColumnFamilyOptions(), kOplogColumnFamilyName, &cf);
+            invariantRocksOK(s);
+
+            delete cf;
+            delete db;
+
+            _getColumnFamilies(column_family_names, column_families); // After we've created the oplog column family, re-fetch the column family configuration.
+        }
+
         // open DB
         rocksdb::DB* db;
-        auto s = rocksdb::DB::Open(_options(), path, &db);
+        s = rocksdb::DB::Open(_options(), path, column_families, &handles, &db);
         invariantRocksOK(s);
         _db.reset(db);
+
+        // Create a map of cf_name -> handle, to be used by record store
+        std::map<std::string, rocksdb::ColumnFamilyHandle*> *cf_map = new std::map<std::string, rocksdb::ColumnFamilyHandle*>();
+        for (std::vector<std::string>::iterator it = column_family_names.begin() ; it != column_family_names.end(); ++it) {
+            cf_map->insert(std::make_pair(*it, handles[it - column_family_names.begin()]));
+        }
+
+        _cf_map.reset(cf_map);
 
         _counterManager.reset(
             new RocksCounterManager(_db.get(), rocksGlobalOptions.crashSafeCounters));
@@ -388,6 +419,29 @@ namespace mongo {
         bb.done();
     }
 
+    void RocksEngine::_getColumnFamilies(std::vector<std::string> &column_family_names, std::vector<rocksdb::ColumnFamilyDescriptor> &column_families) {
+        column_family_names.clear();
+        column_families.clear();
+
+        auto s = rocksdb::DB::ListColumnFamilies(_options(), _path, &column_family_names);
+        invariantRocksOK(s);
+
+        // Always push the default column family
+        column_families.push_back(rocksdb::ColumnFamilyDescriptor(
+                rocksdb::kDefaultColumnFamilyName, _options()));
+
+        for (std::vector<std::string>::iterator it = column_family_names.begin() ; it != column_family_names.end(); ++it) {
+            if (it->compare(rocksdb::kDefaultColumnFamilyName) == 0) { // Skip default, we've already added it.
+                continue;
+            }
+            if (it->compare(kOplogColumnFamilyName)) { // Add oplog column family
+                column_families.push_back(rocksdb::ColumnFamilyDescriptor(*it, rocksdb::ColumnFamilyOptions()));
+            } else { // Add any other CF, this is mainly here for future compatibility and should currently be unreachable.
+                column_families.push_back(rocksdb::ColumnFamilyDescriptor(*it, rocksdb::ColumnFamilyOptions()));
+            }
+        }
+    }
+
     RecoveryUnit* RocksEngine::newRecoveryUnit() {
         return new RocksRecoveryUnit(&_transactionEngine, &_snapshotManager, _db.get(),
                                      _counterManager.get(), _compactionScheduler.get(),
@@ -422,10 +476,10 @@ namespace mongo {
         RocksRecordStore* recordStore =
             options.capped
                 ? new RocksRecordStore(
-                      ns, ident, _db.get(), _counterManager.get(), _durabilityManager.get(), _getIdentPrefix(ident),
+                      ns, ident, _db.get(), _counterManager.get(), _cf_map.get(), _durabilityManager.get(), _getIdentPrefix(ident),
                       true, options.cappedSize ? options.cappedSize : 4096,  // default size
                       options.cappedMaxDocs ? options.cappedMaxDocs : -1)
-                : new RocksRecordStore(ns, ident, _db.get(), _counterManager.get(),
+                : new RocksRecordStore(ns, ident, _db.get(), _counterManager.get(), _cf_map.get(),
                                        _durabilityManager.get(), _getIdentPrefix(ident));
 
         {
