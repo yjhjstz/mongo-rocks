@@ -321,6 +321,14 @@ namespace mongo {
             invariant(_cappedMaxDocs == -1);
         }
 
+        if (_isOplog && cf_map->find("oplog") == cf_map->end()) { // Oplog CF does not exist
+            rocksdb::ColumnFamilyHandle *cf;
+            auto s = db->CreateColumnFamily(_oplogCFOptions(_cappedMaxSize), kOplogColumnFamilyName, &cf);
+            invariantRocksOK(s);
+
+            cf_map->insert(std::make_pair("oplog", cf));
+        }
+
         // Get next id
         std::unique_ptr<RocksIterator> iter(
             RocksRecoveryUnit::NewIteratorNoSnapshot(_db, _prefix));
@@ -367,6 +375,16 @@ namespace mongo {
         }
     }
 
+
+    rocksdb::ColumnFamilyOptions RocksRecordStore::_oplogCFOptions(int64_t maxOplogSize) const {
+        rocksdb::ColumnFamilyOptions options;
+
+        options.compaction_style = rocksdb::kCompactionStyleFIFO;
+        options.compaction_options_fifo.max_table_files_size = maxOplogSize;
+
+        return options;
+    }
+
     int64_t RocksRecordStore::storageSize(OperationContext* txn, BSONObjBuilder* extraInfo,
                                           int infoLevel) const {
         // We need to make it multiple of 256 to make
@@ -394,9 +412,10 @@ namespace mongo {
         invariantRocksOK(status);
         int oldLength = oldValue.size();
 
-        ru->writeBatch()->Delete(key);
         if (_isOplog) {
-            _oplogKeyTracker->deleteKey(ru, dl);
+            _oplogKeyTracker->deleteKey(ru, dl); // No need to delete oplog records, FIFO compaction will do it for us
+        } else {
+            ru->writeBatch()->Delete(key);
         }
 
         _changeNumRecords(txn, -1);

@@ -113,6 +113,8 @@ namespace mongo {
 
         virtual ~RocksRecordStore();
 
+        rocksdb::ColumnFamilyOptions _oplogCFOptions(int64_t maxOplogSize) const;
+
         // name of the RecordStore implementation
         virtual const char* name() const { return "rocks"; }
 

@@ -280,20 +280,6 @@ namespace mongo {
         std::vector<rocksdb::ColumnFamilyHandle*> handles;
 
         _getColumnFamilies(column_family_names, column_families);
-        if (std::find(column_family_names.begin(), column_family_names.end(), kOplogColumnFamilyName) == column_family_names.end()) { // Oplog column family doesn't exist. Create it.
-            rocksdb::DB* db;
-            s = rocksdb::DB::Open(_options(), path, column_families, &handles, &db);
-            invariantRocksOK(s);
-
-            rocksdb::ColumnFamilyHandle *cf;
-            s = db->CreateColumnFamily(rocksdb::ColumnFamilyOptions(), kOplogColumnFamilyName, &cf);
-            invariantRocksOK(s);
-
-            delete cf;
-            delete db;
-
-            _getColumnFamilies(column_family_names, column_families); // After we've created the oplog column family, re-fetch the column family configuration.
-        }
 
         // open DB
         rocksdb::DB* db;
@@ -423,12 +409,14 @@ namespace mongo {
         column_family_names.clear();
         column_families.clear();
 
-        auto s = rocksdb::DB::ListColumnFamilies(_options(), _path, &column_family_names);
-        invariantRocksOK(s);
-
         // Always push the default column family
         column_families.push_back(rocksdb::ColumnFamilyDescriptor(
                 rocksdb::kDefaultColumnFamilyName, _options()));
+
+        auto s = rocksdb::DB::ListColumnFamilies(_options(), _path, &column_family_names);
+        if (!s.ok()) { // Either database is corrupted, and then open will fail as well, or database still doesn't exist, and then we want to return just the default column family
+            return;
+        }
 
         for (std::vector<std::string>::iterator it = column_family_names.begin() ; it != column_family_names.end(); ++it) {
             if (it->compare(rocksdb::kDefaultColumnFamilyName) == 0) { // Skip default, we've already added it.
