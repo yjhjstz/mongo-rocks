@@ -319,25 +319,27 @@ namespace mongo {
             invariant(_cappedMaxDocs == -1);
         }
 
-        // Get next id
-        std::unique_ptr<RocksIterator> iter(
-            RocksRecoveryUnit::NewIteratorNoSnapshot(_db, _prefix));
-        // first check if the collection is empty
-        iter->SeekPrefix("");
-        bool emptyCollection = !iter->Valid();
-        if (!emptyCollection) {
-            // if it's not empty, find next RecordId
-            iter->SeekToLast();
-            dassert(iter->Valid());
-            rocksdb::Slice lastSlice = iter->key();
-            RecordId lastId = _makeRecordId(lastSlice);
-            if (_isOplog || _isCapped) {
-                _cappedVisibilityManager->updateHighestSeen(lastId);
+        if (!_isOplog) { // Not required for oplog, which uses oploghack::extractKey.
+            // Get next id
+            std::unique_ptr<RocksIterator> iter(
+                RocksRecoveryUnit::NewIteratorNoSnapshot(_db, _prefix));
+            // first check if the collection is empty
+            iter->SeekPrefix("");
+            bool emptyCollection = !iter->Valid();
+            if (!emptyCollection) {
+                // if it's not empty, find next RecordId
+                iter->SeekToLast();
+                dassert(iter->Valid());
+                rocksdb::Slice lastSlice = iter->key();
+                RecordId lastId = _makeRecordId(lastSlice);
+                if (_isOplog || _isCapped) {
+                    _cappedVisibilityManager->updateHighestSeen(lastId);
+                }
+                _nextIdNum.store(lastId.repr() + 1);
+            } else {
+                // Need to start at 1 so we are always higher than RecordId::min()
+                _nextIdNum.store(1);
             }
-            _nextIdNum.store(lastId.repr() + 1);
-        } else {
-            // Need to start at 1 so we are always higher than RecordId::min()
-            _nextIdNum.store(1);
         }
 
         // load metadata
